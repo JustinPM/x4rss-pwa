@@ -22,61 +22,114 @@
     <div id="status"></div>
 
     <script>
-        // Register Service Worker
-        if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('sw.js');
+async function processFeed() {
+    const status = document.getElementById('status');
+    const rssUrl = document.getElementById('rssUrl').value;
+    const deviceIp = document.getElementById('deviceIp').value;
+    const targetPath = document.getElementById('targetPath').value;
+
+    try {
+        status.innerText = "Fetching Feed...";
+        const parser = new RSSParser();
+        const feed = await parser.parseURL('https://cors-anywhere.herokuapp.com/' + rssUrl);
+
+        // 1. Filter articles from the last 3 days
+        const threeDaysAgo = new Date();
+        threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+
+        const recentItems = feed.items.filter(item => {
+            const pubDate = new Date(item.pubDate);
+            return pubDate >= threeDaysAgo;
+        });
+
+        if (recentItems.length === 0) {
+            status.innerText = "No articles found in the last 3 days.";
+            return;
         }
 
-        async function processFeed() {
-            const status = document.getElementById('status');
-            const rssUrl = document.getElementById('rssUrl').value;
-            const deviceIp = document.getElementById('deviceIp').value;
-            const targetPath = document.getElementById('targetPath').value;
+        status.innerText = `Found ${recentItems.length} articles. Packaging...`;
+        const zip = new JSZip();
+        
+        // 2. Basic EPUB Requirements
+        zip.file("mimetype", "application/epub+zip");
+        zip.folder("META-INF").file("container.xml", `<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>`);
 
-            try {
-                status.innerText = "Fetching Feed...";
-                // Use a CORS proxy to bypass browser restrictions
-                const parser = new RSSParser();
-                const feed = await parser.parseURL('https://cors-anywhere.herokuapp.com/' + rssUrl);
+        // 3. Generate Chapters & Metadata
+        let manifestEntries = "";
+        let spineEntries = "";
+        let navPoints = "";
 
-                status.innerText = "Creating EPUB...";
-                const zip = new JSZip();
-                
-                // Minimal EPUB structure
-                zip.file("mimetype", "application/epub+zip");
-                const container = `<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
-                    <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
-                </container>`;
-                zip.folder("META-INF").file("container.xml", container);
+        recentItems.forEach((item, index) => {
+            const fileName = `chapter_${index}.html`;
+            const safeTitle = item.title.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+            const content = `<?xml version="1.0" encoding="UTF-8"?>
+                <!DOCTYPE html>
+                <html xmlns="http://www.w3.org/1999/xhtml">
+                <head><title>${safeTitle}</title></head>
+                <body>
+                    <h1>${safeTitle}</h1>
+                    <p><em>Published: ${item.pubDate}</em></p>
+                    <hr/>
+                    <div>${item.content || item.contentSnippet}</div>
+                </body>
+                </html>`;
+            
+            zip.folder("OEBPS").file(fileName, content);
 
-                // Add the first article as a basic HTML file
-                const firstItem = feed.items[0];
-                const content = `<html><body><h1>${firstItem.title}</h1>${firstItem.content || firstItem.contentSnippet}</body></html>`;
-                zip.folder("OEBPS").file("article.html", content);
+            // Add to OPF manifest and spine
+            manifestEntries += `<item id="ch${index}" href="${fileName}" media-type="application/xhtml+xml"/>\n`;
+            spineEntries += `<itemref idref="ch${index}"/>\n`;
+            
+            // Add to Table of Contents (NCX)
+            navPoints += `<navPoint id="navPoint-${index}" playOrder="${index + 1}">
+                <navLabel><text>${safeTitle}</text></navLabel>
+                <content src="${fileName}"/>
+            </navPoint>\n`;
+        });
 
-                // Note: Real EPUBs need a .opf and toc.ncx, but CrossPoint's 
-                // reader is often flexible with simple HTML/ZIP structures.
-                const blob = await zip.generateAsync({type: "blob"});
+        // 4. Create the OPF file (The "Brain" of the EPUB)
+        const opf = `<?xml version="1.0" encoding="UTF-8"?>
+        <package xmlns="http://www.idpf.org/2007/opf" unique-identifier="db-id" version="2.0">
+            <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+                <dc:title>${feed.title} (3-Day Digest)</dc:title>
+                <dc:language>en</dc:language>
+            </metadata>
+            <manifest>
+                <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+                ${manifestEntries}
+            </manifest>
+            <spine toc="ncx">${spineEntries}</spine>
+        </package>`;
 
-                status.innerText = "Uploading to Xteink...";
-                const formData = new FormData();
-                formData.append("file", blob, `${firstItem.title.replace(/\s/g, '_')}.epub`);
+        // 5. Create the NCX file (For skipping chapters)
+        const ncx = `<?xml version="1.0" encoding="UTF-8"?>
+        <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+            <navMap>${navPoints}</navMap>
+        </ncx>`;
 
-                const uploadUrl = `http://${deviceIp}/upload?path=${targetPath}`;
-                
-                // CrossPoint Upload Request
-                await fetch(uploadUrl, {
-                    method: 'POST',
-                    body: formData,
-                    mode: 'no-cors' 
-                });
+        zip.folder("OEBPS").file("content.opf", opf);
+        zip.folder("OEBPS").file("toc.ncx", ncx);
 
-                status.innerText = "Upload Complete!";
-            } catch (err) {
-                status.innerText = "Error: " + err.message;
-                console.error(err);
-            }
-        }
+        // 6. Generate and Upload
+        const blob = await zip.generateAsync({type: "blob"});
+        status.innerText = "Uploading to Xteink...";
+        
+        const formData = new FormData();
+        const safeFileName = `${feed.title.replace(/[^a-z0-9]/gi, '_')}_3day.epub`;
+        formData.append("file", blob, safeFileName);
+
+        await fetch(`http://${deviceIp}/upload?path=${targetPath}`, {
+            method: 'POST',
+            body: formData,
+            mode: 'no-cors' 
+        });
+
+        status.innerText = "Success! Check your Xteink.";
+    } catch (err) {
+        status.innerText = "Error: " + err.message;
+        console.error(err);
+    }
+}
     </script>
 </body>
 </html>
