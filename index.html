@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RSS to Xteink X3</title>
+    <link rel="manifest" href="manifest.json">
+    <script src="https://cdn.jsdelivr.net/npm/rss-parser@3.12.0/dist/rss-parser.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <style>
+        body { font-family: sans-serif; padding: 20px; max-width: 500px; margin: auto; }
+        input, button { width: 100%; padding: 10px; margin: 5px 0; box-sizing: border-box; }
+        #status { color: blue; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h2>Xteink RSS Uploader</h2>
+    <input type="text" id="rssUrl" placeholder="RSS Feed URL">
+    <input type="text" id="deviceIp" placeholder="Xteink IP (e.g. 192.168.1.50)">
+    <input type="text" id="targetPath" placeholder="SD Path (e.g. /sd/books)" value="/sd/books">
+    <button onclick="processFeed()">Send to Xteink</button>
+    <div id="status"></div>
+
+    <script>
+        // Register Service Worker
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('sw.js');
+        }
+
+        async function processFeed() {
+            const status = document.getElementById('status');
+            const rssUrl = document.getElementById('rssUrl').value;
+            const deviceIp = document.getElementById('deviceIp').value;
+            const targetPath = document.getElementById('targetPath').value;
+
+            try {
+                status.innerText = "Fetching Feed...";
+                // Use a CORS proxy to bypass browser restrictions
+                const parser = new RSSParser();
+                const feed = await parser.parseURL('https://cors-anywhere.herokuapp.com/' + rssUrl);
+
+                status.innerText = "Creating EPUB...";
+                const zip = new JSZip();
+                
+                // Minimal EPUB structure
+                zip.file("mimetype", "application/epub+zip");
+                const container = `<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+                    <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+                </container>`;
+                zip.folder("META-INF").file("container.xml", container);
+
+                // Add the first article as a basic HTML file
+                const firstItem = feed.items[0];
+                const content = `<html><body><h1>${firstItem.title}</h1>${firstItem.content || firstItem.contentSnippet}</body></html>`;
+                zip.folder("OEBPS").file("article.html", content);
+
+                // Note: Real EPUBs need a .opf and toc.ncx, but CrossPoint's 
+                // reader is often flexible with simple HTML/ZIP structures.
+                const blob = await zip.generateAsync({type: "blob"});
+
+                status.innerText = "Uploading to Xteink...";
+                const formData = new FormData();
+                formData.append("file", blob, `${firstItem.title.replace(/\s/g, '_')}.epub`);
+
+                const uploadUrl = `http://${deviceIp}/upload?path=${targetPath}`;
+                
+                // CrossPoint Upload Request
+                await fetch(uploadUrl, {
+                    method: 'POST',
+                    body: formData,
+                    mode: 'no-cors' 
+                });
+
+                status.innerText = "Upload Complete!";
+            } catch (err) {
+                status.innerText = "Error: " + err.message;
+                console.error(err);
+            }
+        }
+    </script>
+</body>
+</html>
