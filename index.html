@@ -3,133 +3,136 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RSS to Xteink X3</title>
+    <title>Xteink RSS Tool</title>
     <link rel="manifest" href="manifest.json">
     <script src="https://cdn.jsdelivr.net/npm/rss-parser@3.12.0/dist/rss-parser.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <style>
-        body { font-family: sans-serif; padding: 20px; max-width: 500px; margin: auto; }
-        input, button { width: 100%; padding: 10px; margin: 5px 0; box-sizing: border-box; }
-        #status { color: blue; font-weight: bold; }
+        body { font-family: -apple-system, sans-serif; padding: 20px; max-width: 600px; margin: auto; background: #f4f4f9; }
+        .card { background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        input { width: 100%; padding: 10px; margin: 8px 0; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+        .btn-group { display: flex; gap: 10px; }
+        button { flex: 1; padding: 12px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
+        .btn-preview { background: #6c757d; color: white; }
+        .btn-upload { background: #007bff; color: white; }
+        #console { background: #222; color: #0f0; padding: 10px; border-radius: 4px; font-family: monospace; font-size: 12px; height: 150px; overflow-y: auto; white-space: pre-wrap; }
+        #previewArea { max-height: 300px; overflow-y: auto; border: 1px solid #ddd; padding: 10px; margin-top: 10px; font-size: 14px; display: none; background: white; }
     </style>
 </head>
 <body>
-    <h2>Xteink RSS Uploader</h2>
+
+<div class="card">
+    <h3>Xteink X3 RSS Manager</h3>
     <input type="text" id="rssUrl" placeholder="RSS Feed URL">
     <input type="text" id="deviceIp" placeholder="Xteink IP (e.g. 192.168.1.50)">
-    <input type="text" id="targetPath" placeholder="SD Path (e.g. /sd/books)" value="/sd/books">
-    <button onclick="processFeed()">Send to Xteink</button>
-    <div id="status"></div>
+    <input type="text" id="targetPath" placeholder="SD Path" value="/sd/books">
+    
+    <div class="btn-group">
+        <button class="btn-preview" onclick="previewFeed()">Preview Feed</button>
+        <button class="btn-upload" onclick="processAndUpload()">Upload to X3</button>
+    </div>
+</div>
 
-    <script>
-async function processFeed() {
-    const status = document.getElementById('status');
-    const rssUrl = document.getElementById('rssUrl').value;
-    const deviceIp = document.getElementById('deviceIp').value;
-    const targetPath = document.getElementById('targetPath').value;
+<div id="previewArea" class="card"></div>
 
-    try {
-        status.innerText = "Fetching Feed...";
+<div class="card">
+    <strong>System Console:</strong>
+    <div id="console">Initializing... Ready.</div>
+    <p style="font-size: 11px; color: #666;">Note: If 403 occurs, <a href="https://cors-anywhere.herokuapp.com/corsdemo" target="_blank">click here</a> to unlock the proxy.</p>
+</div>
+
+<script>
+    const logEl = document.getElementById('console');
+    const previewEl = document.getElementById('previewArea');
+    const PROXY = 'https://cors-anywhere.herokuapp.com/';
+
+    function log(msg, isError = false) {
+        const time = new Date().toLocaleTimeString();
+        logEl.innerHTML += `<div style="color: ${isError ? '#ff5555' : '#0f0'}">[${time}] ${msg}</div>`;
+        logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    async function fetchAndParse() {
+        const rssUrl = document.getElementById('rssUrl').value;
+        if (!rssUrl) throw new Error("Please enter an RSS URL");
+        
+        log(`Fetching: ${rssUrl}`);
         const parser = new RSSParser();
-        const feed = await parser.parseURL('https://cors-anywhere.herokuapp.com/' + rssUrl);
-
-        // 1. Filter articles from the last 3 days
+        
+        // Attempt fetch through proxy
+        const feed = await parser.parseURL(PROXY + rssUrl);
+        
         const threeDaysAgo = new Date();
         threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
 
-        const recentItems = feed.items.filter(item => {
-            const pubDate = new Date(item.pubDate);
-            return pubDate >= threeDaysAgo;
-        });
-
-        if (recentItems.length === 0) {
-            status.innerText = "No articles found in the last 3 days.";
-            return;
-        }
-
-        status.innerText = `Found ${recentItems.length} articles. Packaging...`;
-        const zip = new JSZip();
+        const recentItems = feed.items.filter(item => new Date(item.pubDate) >= threeDaysAgo);
+        log(`Found ${feed.items.length} total. ${recentItems.length} from last 3 days.`);
         
-        // 2. Basic EPUB Requirements
-        zip.file("mimetype", "application/epub+zip");
-        zip.folder("META-INF").file("container.xml", `<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>`);
-
-        // 3. Generate Chapters & Metadata
-        let manifestEntries = "";
-        let spineEntries = "";
-        let navPoints = "";
-
-        recentItems.forEach((item, index) => {
-            const fileName = `chapter_${index}.html`;
-            const safeTitle = item.title.replace(/&/g, "&amp;").replace(/</g, "&lt;");
-            const content = `<?xml version="1.0" encoding="UTF-8"?>
-                <!DOCTYPE html>
-                <html xmlns="http://www.w3.org/1999/xhtml">
-                <head><title>${safeTitle}</title></head>
-                <body>
-                    <h1>${safeTitle}</h1>
-                    <p><em>Published: ${item.pubDate}</em></p>
-                    <hr/>
-                    <div>${item.content || item.contentSnippet}</div>
-                </body>
-                </html>`;
-            
-            zip.folder("OEBPS").file(fileName, content);
-
-            // Add to OPF manifest and spine
-            manifestEntries += `<item id="ch${index}" href="${fileName}" media-type="application/xhtml+xml"/>\n`;
-            spineEntries += `<itemref idref="ch${index}"/>\n`;
-            
-            // Add to Table of Contents (NCX)
-            navPoints += `<navPoint id="navPoint-${index}" playOrder="${index + 1}">
-                <navLabel><text>${safeTitle}</text></navLabel>
-                <content src="${fileName}"/>
-            </navPoint>\n`;
-        });
-
-        // 4. Create the OPF file (The "Brain" of the EPUB)
-        const opf = `<?xml version="1.0" encoding="UTF-8"?>
-        <package xmlns="http://www.idpf.org/2007/opf" unique-identifier="db-id" version="2.0">
-            <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
-                <dc:title>${feed.title} (3-Day Digest)</dc:title>
-                <dc:language>en</dc:language>
-            </metadata>
-            <manifest>
-                <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
-                ${manifestEntries}
-            </manifest>
-            <spine toc="ncx">${spineEntries}</spine>
-        </package>`;
-
-        // 5. Create the NCX file (For skipping chapters)
-        const ncx = `<?xml version="1.0" encoding="UTF-8"?>
-        <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
-            <navMap>${navPoints}</navMap>
-        </ncx>`;
-
-        zip.folder("OEBPS").file("content.opf", opf);
-        zip.folder("OEBPS").file("toc.ncx", ncx);
-
-        // 6. Generate and Upload
-        const blob = await zip.generateAsync({type: "blob"});
-        status.innerText = "Uploading to Xteink...";
-        
-        const formData = new FormData();
-        const safeFileName = `${feed.title.replace(/[^a-z0-9]/gi, '_')}_3day.epub`;
-        formData.append("file", blob, safeFileName);
-
-        await fetch(`http://${deviceIp}/upload?path=${targetPath}`, {
-            method: 'POST',
-            body: formData,
-            mode: 'no-cors' 
-        });
-
-        status.innerText = "Success! Check your Xteink.";
-    } catch (err) {
-        status.innerText = "Error: " + err.message;
-        console.error(err);
+        return { feed, recentItems };
     }
-}
-    </script>
+
+    async function previewFeed() {
+        previewEl.style.display = 'none';
+        previewEl.innerHTML = '';
+        try {
+            const { recentItems } = await fetchAndParse();
+            previewEl.style.display = 'block';
+            previewEl.innerHTML = '<h4>Articles found:</h4>';
+            recentItems.forEach(item => {
+                previewEl.innerHTML += `<div><strong>• ${item.title}</strong><br><small>${item.pubDate}</small></div><hr>`;
+            });
+            log("Preview generated.");
+        } catch (err) {
+            log(err.message, true);
+            if(err.message.includes('403')) log("ACTION REQUIRED: Visit the 'corsdemo' link below to enable proxy access.", true);
+        }
+    }
+
+    async function processAndUpload() {
+        try {
+            const { feed, recentItems } = await fetchAndParse();
+            if (recentItems.length === 0) throw new Error("No recent articles to package.");
+
+            log("Generating EPUB structure...");
+            const zip = new JSZip();
+            zip.file("mimetype", "application/epub+zip");
+            zip.folder("META-INF").file("container.xml", `<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>`);
+
+            let manifest = ""; let spine = ""; let ncx = "";
+            recentItems.forEach((item, i) => {
+                const fileName = `ch${i}.html`;
+                const content = `<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body><h1>${item.title}</h1><p>${item.content || item.contentSnippet}</p></body></html>`;
+                zip.folder("OEBPS").file(fileName, content);
+                manifest += `<item id="ch${i}" href="${fileName}" media-type="application/xhtml+xml"/>`;
+                spine += `<itemref idref="ch${i}"/>`;
+                ncx += `<navPoint id="n${i}" playOrder="${i+1}"><navLabel><text>${item.title.substring(0,30)}...</text></navLabel><content src="${fileName}"/></navPoint>`;
+            });
+
+            zip.folder("OEBPS").file("content.opf", `<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>${feed.title}</dc:title></metadata><manifest><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>${manifest}</manifest><spine toc="ncx">${spine}</spine></package>`);
+            zip.folder("OEBPS").file("toc.ncx", `<?xml version="1.0"?><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><navMap>${ncx}</navMap></ncx>`);
+
+            const blob = await zip.generateAsync({type: "blob"});
+            log("Uploading to device...");
+
+            const deviceIp = document.getElementById('deviceIp').value;
+            const targetPath = document.getElementById('targetPath').value;
+            const formData = new FormData();
+            formData.append("file", blob, "news_digest.epub");
+
+            // Since we use no-cors, we won't get a "success" body, 
+            // but the browser will trigger the upload.
+            fetch(`http://${deviceIp}/upload?path=${targetPath}`, {
+                method: 'POST',
+                body: formData,
+                mode: 'no-cors'
+            });
+            
+            log("Upload command sent! Check your Xteink screen.");
+
+        } catch (err) {
+            log(err.message, true);
+        }
+    }
+</script>
 </body>
 </html>
